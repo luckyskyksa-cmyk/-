@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#57a83a" />
+    <title>لاكي سكاي - إدارة الديون</title>
+    <link rel="stylesheet" href="/app.css" />
+  </head>
+  <body>
+    <!-- تسجيل الدخول -->
+    <div id="login-screen" class="login-screen hidden">
+      <form id="login-form" class="login-card">
+        <img src="/assets/logo.png" alt="Lucky Sky" />
+        <h2>نظام إدارة الديون</h2>
+        <p class="sub">للاستخدام الداخلي فقط</p>
+        <label for="password">كلمة المرور</label>
+        <input type="password" id="password" placeholder="أدخل كلمة المرور" autocomplete="current-password" />
+        <div id="login-error" class="form-error"></div>
+        <button type="submit" class="btn btn-green btn-block">دخول</button>
+      </form>
+    </div>
+
+    <!-- التطبيق -->
+    <div id="app" class="layout hidden">
+      <aside class="sidebar">
+        <div class="logo-box"><img src="/assets/logo.png" alt="Lucky Sky" /></div>
+        <div class="nav-title">القائمة</div>
+        <div class="nav-item" data-route="dashboard"><span class="ic">🏠</span> الرئيسية</div>
+        <div class="nav-item" data-route="shops"><span class="ic">🏬</span> المحلات</div>
+        <div class="nav-title">المبيعات والمخزون</div>
+        <div class="nav-item" data-route="sale"><span class="ic">🛒</span> بيع جديد</div>
+        <div class="nav-item" data-route="inventory"><span class="ic">📦</span> المخزون</div>
+        <div class="nav-item" data-route="purchases"><span class="ic">🚚</span> المشتريات</div>
+        <div class="nav-title">المحاسبة</div>
+        <div class="nav-item" data-route="reports"><span class="ic">📊</span> التقارير (PDF)</div>
+        <div class="nav-item" data-route="import"><span class="ic">📥</span> استيراد إكسل</div>
+        <div class="nav-item" data-route="backups"><span class="ic">🛡️</span> النسخ الاحتياطي</div>
+        <div class="nav-item" data-route="audit"><span class="ic">📜</span> سجل العمليات</div>
+        <div class="nav-item" data-route="settings"><span class="ic">⚙️</span> الإعدادات والضريبة</div>
+        <div class="spacer"></div>
+        <div class="side-foot">
+          نظام داخلي • حفظ دائم مدى الحياة<br />يعمل بدون نت / بالنت • 3 أجهزة
+          <div style="margin-top:8px"><span class="back-link" id="logout-btn">تسجيل الخروج</span></div>
+        </div>
+      </aside>
+      <div class="main">
+        <div id="view" class="content"></div>
+      </div>
+    </div>
+
+    <div id="modal-root"></div>
+    <div id="toast" class="toast hidden"></div>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

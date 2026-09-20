@@ -1,0 +1,16 @@
+{
+  "name": "لاكي سكاي - Lucky Sky",
+  "install": "npm ci",
+  "terminals": [
+    {
+      "name": "lucky-sky-server",
+      "command": "npm start"
+    }
+  ],
+  "ports": [
+    {
+      "name": "app",
+      "port": 3000
+    }
+  ]
+}
