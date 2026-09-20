@@ -76,6 +76,12 @@ router.get('/dashboard', (req, res) => {
     series.push({ month: m, debts: round2(r.d), paid: round2(r.p) });
   }
 
+  // أصناف قاربت على النفاد
+  const lowStock = db.prepare('SELECT id, name, code, stock, unit, low_threshold FROM products WHERE stock <= low_threshold ORDER BY stock ASC LIMIT 8').all();
+  const productsCount = db.prepare('SELECT COUNT(*) AS c FROM products').get().c;
+  const monthSales = db.prepare(`SELECT COALESCE(SUM(total),0) AS t FROM sales WHERE substr(date,1,7)=?`).get(month).t;
+  const monthPurch = db.prepare(`SELECT COALESCE(SUM(total),0) AS t FROM purchases WHERE substr(date,1,7)=?`).get(month).t;
+
   res.json({
     totalDebt: round2(totalDebt),
     shopsCount: shops.length,
@@ -84,6 +90,10 @@ router.get('/dashboard', (req, res) => {
     monthPaid: round2(monthStats.paid),
     monthNewDebts: round2(monthStats.newDebts),
     monthReturns: round2(monthStats.returns),
+    monthSales: round2(monthSales),
+    monthPurchases: round2(monthPurch),
+    productsCount,
+    lowStock,
     topShops: ranked.slice(0, 8),
     recent,
     alerts: alerts.slice(0, 6),
@@ -253,6 +263,8 @@ router.get('/reports/monthly', (req, res) => {
   ranked.sort((a, b) => b.balance - a.balance);
 
   const vat = vatBreakdown(totalDebt);
+  const salesStats = db.prepare(`SELECT COALESCE(SUM(total),0) AS total, COALESCE(SUM(vat),0) AS vat, COUNT(*) AS cnt FROM sales WHERE substr(date,1,7)=?`).get(month);
+  const purchStats = db.prepare(`SELECT COALESCE(SUM(total),0) AS total, COUNT(*) AS cnt FROM purchases WHERE substr(date,1,7)=?`).get(month);
   res.json({
     month,
     paid: round2(stats.paid),
@@ -263,6 +275,11 @@ router.get('/reports/monthly', (req, res) => {
     returns: round2(stats.returns),
     totalDebt: round2(totalDebt),
     vat,
+    sales: round2(salesStats.total),
+    salesVat: round2(salesStats.vat),
+    salesCount: salesStats.cnt,
+    purchases: round2(purchStats.total),
+    purchasesCount: purchStats.cnt,
     topShops: ranked.slice(0, 5),
     settings: getSettings(),
   });
@@ -359,6 +376,141 @@ function normDate(v) {
   if (m) return `${m[1]}-${m[2].padStart(2,'0')}-${m[3].padStart(2,'0')}`;
   return s.slice(0, 10) || new Date().toISOString().slice(0, 10);
 }
+
+// ============ المخزون (الأصناف) ============
+router.get('/products', (req, res) => {
+  const search = (req.query.search || '').trim();
+  const low = req.query.low === '1';
+  let rows;
+  if (search) {
+    const like = `%${search}%`;
+    rows = db.prepare('SELECT * FROM products WHERE name LIKE ? OR code LIKE ? ORDER BY name').all(like, like);
+  } else {
+    rows = db.prepare('SELECT * FROM products ORDER BY name').all();
+  }
+  if (low) rows = rows.filter((p) => p.stock <= p.low_threshold);
+  res.json(rows);
+});
+
+router.post('/products', (req, res) => {
+  const { code, name, unit, cost, price, stock, low_threshold } = req.body || {};
+  if (!name || !name.trim()) return res.status(400).json({ error: 'اسم الصنف مطلوب' });
+  const info = db.prepare('INSERT INTO products (code, name, unit, cost, price, stock, low_threshold) VALUES (?,?,?,?,?,?,?)')
+    .run((code||'').trim(), name.trim(), (unit||'حبة').trim(), Number(cost)||0, Number(price)||0, Number(stock)||0, Number(low_threshold)||5);
+  audit.log('إضافة صنف للمخزون', 'product', { id: info.lastInsertRowid, name: name.trim() });
+  res.status(201).json({ id: info.lastInsertRowid });
+});
+
+router.put('/products/:id', (req, res) => {
+  const p = db.prepare('SELECT * FROM products WHERE id=?').get(req.params.id);
+  if (!p) return res.status(404).json({ error: 'الصنف غير موجود' });
+  const { code, name, unit, cost, price, stock, low_threshold } = req.body || {};
+  if (!name || !name.trim()) return res.status(400).json({ error: 'اسم الصنف مطلوب' });
+  db.prepare('UPDATE products SET code=?, name=?, unit=?, cost=?, price=?, stock=?, low_threshold=? WHERE id=?')
+    .run((code||'').trim(), name.trim(), (unit||'حبة').trim(), Number(cost)||0, Number(price)||0, Number(stock)||0, Number(low_threshold)||5, req.params.id);
+  audit.log('تعديل صنف', 'product', { id: req.params.id, name: name.trim() });
+  res.json({ ok: true });
+});
+
+router.delete('/products/:id', (req, res) => {
+  db.prepare('DELETE FROM products WHERE id=?').run(req.params.id);
+  audit.log('حذف صنف', 'product', { id: req.params.id });
+  res.json({ ok: true });
+});
+
+// ============ المشتريات (تزيد المخزون) ============
+router.get('/purchases', (req, res) => {
+  const rows = db.prepare('SELECT * FROM purchases ORDER BY id DESC LIMIT 100').all();
+  res.json(rows);
+});
+
+router.post('/purchases', (req, res) => {
+  const { supplier, date, note, items } = req.body || {};
+  if (!Array.isArray(items) || !items.length) return res.status(400).json({ error: 'أضف صنفاً واحداً على الأقل' });
+  const d = (date && String(date).trim()) || new Date().toISOString().slice(0, 10);
+  const tx = db.transaction(() => {
+    let total = 0;
+    const pInfo = db.prepare('INSERT INTO purchases (supplier, date, note, total) VALUES (?,?,?,0)').run((supplier||'').trim(), d, (note||'').trim());
+    const pid = pInfo.lastInsertRowid;
+    const insItem = db.prepare('INSERT INTO purchase_items (purchase_id, product_id, name, code, qty, cost, amount) VALUES (?,?,?,?,?,?,?)');
+    const addStock = db.prepare('UPDATE products SET stock = stock + ?, cost = ? WHERE id=?');
+    for (const it of items) {
+      const qty = Number(it.qty) || 0, cost = Number(it.cost) || 0;
+      if (qty <= 0) continue;
+      const prod = it.product_id ? db.prepare('SELECT * FROM products WHERE id=?').get(it.product_id) : null;
+      const amount = round2(qty * cost);
+      insItem.run(pid, prod ? prod.id : null, prod ? prod.name : (it.name||''), prod ? prod.code : (it.code||''), qty, cost, amount);
+      if (prod) addStock.run(qty, cost, prod.id);
+      total += amount;
+    }
+    db.prepare('UPDATE purchases SET total=? WHERE id=?').run(round2(total), pid);
+    return { pid, total: round2(total) };
+  });
+  const r = tx();
+  audit.log('فاتورة شراء', 'purchase:' + r.pid, { supplier: (supplier||'').trim(), total: r.total });
+  res.status(201).json({ ok: true, id: r.pid, total: r.total });
+});
+
+// ============ المبيعات / نقطة البيع (تنقص المخزون) ============
+router.get('/sales', (req, res) => {
+  const rows = db.prepare(`SELECT s.*, sh.name AS shop_name FROM sales s LEFT JOIN shops sh ON sh.id=s.shop_id ORDER BY s.id DESC LIMIT 100`).all();
+  res.json(rows);
+});
+
+router.get('/sales/:id', (req, res) => {
+  const sale = db.prepare(`SELECT s.*, sh.name AS shop_name, sh.phone AS shop_phone FROM sales s LEFT JOIN shops sh ON sh.id=s.shop_id WHERE s.id=?`).get(req.params.id);
+  if (!sale) return res.status(404).json({ error: 'الفاتورة غير موجودة' });
+  sale.items = db.prepare('SELECT * FROM sale_items WHERE sale_id=?').all(req.params.id);
+  sale.settings = getSettings();
+  res.json(sale);
+});
+
+router.post('/sales', (req, res) => {
+  const { shop_id, customer_name, date, payment_type, apply_vat, items, note } = req.body || {};
+  if (!Array.isArray(items) || !items.length) return res.status(400).json({ error: 'أضف صنفاً واحداً على الأقل' });
+  const pt = ['cash','card','transfer','credit'].includes(payment_type) ? payment_type : 'cash';
+  if (pt === 'credit' && !shop_id) return res.status(400).json({ error: 'البيع بالآجل يتطلب اختيار محل (زبون)' });
+  const d = (date && String(date).trim()) || new Date().toISOString().slice(0, 10);
+  const rate = Number(getSettings().vat_rate || 0);
+
+  // تحقق من توفر المخزون
+  for (const it of items) {
+    if (!it.product_id) continue;
+    const prod = db.prepare('SELECT * FROM products WHERE id=?').get(it.product_id);
+    if (prod && Number(it.qty) > prod.stock) return res.status(400).json({ error: `الكمية غير متوفرة للصنف: ${prod.name} (المتوفر ${prod.stock})` });
+  }
+
+  const tx = db.transaction(() => {
+    let subtotal = 0;
+    const sInfo = db.prepare('INSERT INTO sales (shop_id, customer_name, date, payment_type, subtotal, vat, total, note) VALUES (?,?,?,?,0,0,0,?)')
+      .run(shop_id || null, (customer_name||'').trim(), d, pt, (note||'').trim());
+    const sid = sInfo.lastInsertRowid;
+    const insItem = db.prepare('INSERT INTO sale_items (sale_id, product_id, name, code, qty, price, amount) VALUES (?,?,?,?,?,?,?)');
+    const cutStock = db.prepare('UPDATE products SET stock = stock - ? WHERE id=?');
+    for (const it of items) {
+      const qty = Number(it.qty) || 0, price = Number(it.price) || 0;
+      if (qty <= 0) continue;
+      const prod = it.product_id ? db.prepare('SELECT * FROM products WHERE id=?').get(it.product_id) : null;
+      const amount = round2(qty * price);
+      insItem.run(sid, prod ? prod.id : null, prod ? prod.name : (it.name||''), prod ? prod.code : (it.code||''), qty, price, amount);
+      if (prod) cutStock.run(qty, prod.id);
+      subtotal += amount;
+    }
+    const vat = apply_vat ? round2(subtotal * rate / 100) : 0;
+    const total = round2(subtotal + vat);
+    db.prepare('UPDATE sales SET subtotal=?, vat=?, total=? WHERE id=?').run(round2(subtotal), vat, total, sid);
+
+    // البيع بالآجل يزيد دين المحل كحركة بضاعة
+    if (pt === 'credit' && shop_id) {
+      db.prepare(`INSERT INTO entries (shop_id, kind, date, description, amount, status, note) VALUES (?, 'item', ?, ?, ?, 'due', ?)`)
+        .run(shop_id, d, 'فاتورة بيع بالآجل #' + sid, total, 'بيع آجل');
+    }
+    return { sid, subtotal: round2(subtotal), vat, total };
+  });
+  const r = tx();
+  audit.log('فاتورة بيع', 'sale:' + r.sid, { total: r.total, payment_type: pt, shop_id: shop_id || null });
+  res.status(201).json({ ok: true, id: r.sid, ...r });
+});
 
 // ============ النسخ الاحتياطي ============
 router.get('/backups', (req, res) => res.json(listBackups()));

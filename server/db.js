@@ -63,6 +63,71 @@ db.exec(`
     at TEXT NOT NULL DEFAULT (datetime('now'))
   );
   CREATE INDEX IF NOT EXISTS idx_audit_at ON audit_log(at);
+
+  -- المخزون: الأصناف وكمياتها
+  CREATE TABLE IF NOT EXISTS products (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    code TEXT DEFAULT '',
+    name TEXT NOT NULL,
+    unit TEXT DEFAULT 'حبة',
+    cost REAL DEFAULT 0,
+    price REAL DEFAULT 0,
+    stock REAL DEFAULT 0,
+    low_threshold REAL DEFAULT 5,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_products_name ON products(name);
+  CREATE INDEX IF NOT EXISTS idx_products_code ON products(code);
+
+  -- فواتير الشراء (تزيد المخزون)
+  CREATE TABLE IF NOT EXISTS purchases (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    supplier TEXT DEFAULT '',
+    date TEXT NOT NULL DEFAULT (date('now')),
+    note TEXT DEFAULT '',
+    total REAL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE TABLE IF NOT EXISTS purchase_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    purchase_id INTEGER NOT NULL,
+    product_id INTEGER,
+    name TEXT DEFAULT '',
+    code TEXT DEFAULT '',
+    qty REAL DEFAULT 0,
+    cost REAL DEFAULT 0,
+    amount REAL DEFAULT 0,
+    FOREIGN KEY (purchase_id) REFERENCES purchases(id) ON DELETE CASCADE
+  );
+  CREATE INDEX IF NOT EXISTS idx_pitems_purchase ON purchase_items(purchase_id);
+
+  -- فواتير البيع (تنقص المخزون؛ الآجل يزيد دين المحل)
+  CREATE TABLE IF NOT EXISTS sales (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    shop_id INTEGER,
+    customer_name TEXT DEFAULT '',
+    date TEXT NOT NULL DEFAULT (date('now')),
+    payment_type TEXT DEFAULT 'cash' CHECK (payment_type IN ('cash','card','transfer','credit')),
+    subtotal REAL DEFAULT 0,
+    vat REAL DEFAULT 0,
+    total REAL DEFAULT 0,
+    note TEXT DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (shop_id) REFERENCES shops(id) ON DELETE SET NULL
+  );
+  CREATE TABLE IF NOT EXISTS sale_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    sale_id INTEGER NOT NULL,
+    product_id INTEGER,
+    name TEXT DEFAULT '',
+    code TEXT DEFAULT '',
+    qty REAL DEFAULT 0,
+    price REAL DEFAULT 0,
+    amount REAL DEFAULT 0,
+    FOREIGN KEY (sale_id) REFERENCES sales(id) ON DELETE CASCADE
+  );
+  CREATE INDEX IF NOT EXISTS idx_sitems_sale ON sale_items(sale_id);
+  CREATE INDEX IF NOT EXISTS idx_sales_date ON sales(date);
 `);
 
 // ترحيلات آمنة لإضافة أعمدة جديدة دون فقدان البيانات

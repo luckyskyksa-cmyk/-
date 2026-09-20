@@ -55,7 +55,7 @@
     const m = (location.hash || '').match(/#\/shop\/(\d+)/);
     if (m) return { route: 'shop', shopId: m[1] };
     const r = (location.hash || '').replace('#/', '');
-    if (['dashboard','shops','reports','import','backups','audit','settings'].includes(r)) return { route: r };
+    if (['dashboard','shops','sale','inventory','purchases','reports','import','backups','audit','settings'].includes(r)) return { route: r };
     return { route: 'dashboard' };
   }
   window.addEventListener('hashchange', () => { const r = routeFromHash(); navigate(r.route, r.shopId ? { shopId: r.shopId } : {}); });
@@ -63,7 +63,7 @@
 
   function render() {
     const v = $('#view'); v.innerHTML = '<div class="loading">جارٍ التحميل…</div>';
-    ({ dashboard: renderDashboard, shops: renderShops, shop: renderShop, reports: renderReports, import: renderImport, backups: renderBackups, audit: renderAudit, settings: renderSettings }[state.route] || renderDashboard)();
+    ({ dashboard: renderDashboard, shops: renderShops, shop: renderShop, sale: renderSale, inventory: renderInventory, purchases: renderPurchases, reports: renderReports, import: renderImport, backups: renderBackups, audit: renderAudit, settings: renderSettings }[state.route] || renderDashboard)();
   }
 
   // ===== لوحة التحكم =====
@@ -84,7 +84,7 @@
         <div class="kpi accent"><div class="ic">💰</div><div class="label">إجمالي الديون المستحقة</div><div class="value">${money(d.totalDebt)}<span class="cur">${cur()}</span></div></div>
         <div class="kpi"><div class="ic">✅</div><div class="label">المُسدّد هذا الشهر</div><div class="value">${money(d.monthPaid)}<span class="cur">${cur()}</span></div></div>
         <div class="kpi"><div class="ic">📤</div><div class="label">ديون جديدة هذا الشهر</div><div class="value">${money(d.monthNewDebts)}<span class="cur">${cur()}</span></div></div>
-        <div class="kpi"><div class="ic">🏬</div><div class="label">المحلات المدينة</div><div class="value">${money(d.debtorsCount)}</div><div class="trend">من أصل ${money(d.shopsCount)} محل</div></div>
+        <div class="kpi"><div class="ic">🛒</div><div class="label">مبيعات هذا الشهر</div><div class="value">${money(d.monthSales||0)}<span class="cur">${cur()}</span></div><div class="trend">مشتريات: ${money(d.monthPurchases||0)} ${cur()}</div></div>
       </div>
       <div class="grid-2">
         <div class="card">
@@ -105,6 +105,10 @@
           <div class="card-head"><h3>🔔 تنبيهات المتأخرين</h3></div>
           <div class="card-body" id="alerts"></div>
         </div>
+      </div>
+      <div class="card" style="margin-top:16px">
+        <div class="card-head"><h3>📦 أصناف قاربت على النفاد</h3><button class="btn btn-soft btn-sm" id="go-inv">إدارة المخزون</button></div>
+        <div class="card-body" id="lowstock"></div>
       </div>`;
 
     const maxBal = Math.max(1, ...d.topShops.map((s) => s.balance));
@@ -144,9 +148,15 @@
       waSend(b.dataset.phone, `السلام عليكم، تذكير ودّي من ${SETTINGS.business_name}: الرصيد المستحق على حسابكم ${money(b.dataset.bal)} ${cur()}. نأمل ترتيب السداد، وشكراً لتعاملكم.`);
     }));
 
+    // أصناف قاربت على النفاد
+    const ls = $('#lowstock');
+    ls.innerHTML = (d.lowStock && d.lowStock.length) ? `<table><thead><tr><th>الصنف</th><th>الكود</th><th>المتبقي</th><th>حد التنبيه</th></tr></thead><tbody>${d.lowStock.map((p)=>`<tr class="clickable" data-pid="${p.id}"><td style="font-weight:700">${esc(p.name)}</td><td class="code">${esc(p.code)||'—'}</td><td class="amount due num">${money(p.stock)} ${esc(p.unit)||''}</td><td class="num muted">${money(p.low_threshold)}</td></tr>`).join('')}</tbody></table>` : '<div class="empty">لا توجد أصناف قاربت على النفاد 👍</div>';
+    $$('#lowstock tr[data-pid]').forEach((r) => r.addEventListener('click', () => navigate('inventory')));
+
     $('#qs').addEventListener('click', () => openShopModal());
     $('#all-shops').addEventListener('click', () => navigate('shops'));
     $('#go-search').addEventListener('click', () => navigate('shops'));
+    $('#go-inv').addEventListener('click', () => navigate('inventory'));
     $('#qp').addEventListener('click', () => navigate('shops'));
   }
 
@@ -408,6 +418,184 @@
     });
   }
 
+  // ===== المخزون =====
+  function openProductModal(prod, after) {
+    const m = modal(`
+      <div class="modal-head"><h3>${prod?'تعديل صنف':'صنف جديد'}</h3><button class="modal-close" data-close>&times;</button></div>
+      <form id="prod-form">
+        <div class="row2"><div><label>كود الصنف</label><input id="pr-code" value="${esc(prod?.code)||''}" /></div><div><label>الوحدة</label><input id="pr-unit" value="${esc(prod?.unit)||'حبة'}" /></div></div>
+        <label>اسم الصنف *</label><input id="pr-name" value="${esc(prod?.name)||''}" />
+        <div class="row3"><div><label>سعر التكلفة</label><input type="number" id="pr-cost" step="0.01" value="${prod?.cost||0}" /></div><div><label>سعر البيع</label><input type="number" id="pr-price" step="0.01" value="${prod?.price||0}" /></div><div><label>الكمية</label><input type="number" id="pr-stock" step="0.01" value="${prod?.stock||0}" ${prod?'disabled':''} /></div></div>
+        <label>حد التنبيه (تنبيه عند وصول الكمية له)</label><input type="number" id="pr-low" step="0.01" value="${prod?.low_threshold??5}" />
+        ${prod?'<div class="sub">لتغيير الكمية استخدم فاتورة شراء (تزيد) أو بيع (تنقص).</div>':''}
+        <div class="form-error" id="pr-err"></div>
+        <div class="modal-actions"><button type="button" class="btn btn-ghost" data-close>إلغاء</button><button class="btn btn-green btn-block" type="submit">حفظ</button></div>
+      </form>`);
+    $('#prod-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const body = { code:$('#pr-code').value, name:$('#pr-name').value, unit:$('#pr-unit').value, cost:$('#pr-cost').value, price:$('#pr-price').value, low_threshold:$('#pr-low').value };
+      if (!prod) body.stock = $('#pr-stock').value;
+      try {
+        if (prod) { const b2 = {...body, stock: prod.stock}; await api('/products/'+prod.id, { method:'PUT', body:b2 }); }
+        else await api('/products', { method:'POST', body });
+        m.close(); toast('تم الحفظ', 'ok'); after && after();
+      } catch (err) { $('#pr-err').textContent = err.message; }
+    });
+  }
+
+  async function renderInventory() {
+    const v = $('#view');
+    v.innerHTML = `
+      <div class="topbar" style="margin:-24px -26px 22px; position:static;">
+        <div class="page-title">المخزون<small>الأصناف وكمياتها</small></div>
+        <div class="topbar-actions"><div class="searchbar"><input id="inv-search" placeholder="ابحث باسم الصنف أو الكود…" style="border:none;background:none;margin:0;padding:0;min-width:220px" /></div><button class="btn btn-green" id="add-prod">＋ صنف جديد</button></div>
+      </div>
+      <div class="card"><div class="card-body" style="padding:0 4px"><table>
+        <thead><tr><th>الصنف</th><th>الكود</th><th>الوحدة</th><th>التكلفة</th><th>سعر البيع</th><th>الكمية</th><th>الحالة</th><th></th></tr></thead>
+        <tbody id="inv-body"></tbody></table><div id="inv-empty" class="empty hidden">لا أصناف. أضف صنفاً أو استورد من إكسل.</div></div></div>`;
+    async function load() {
+      const q = $('#inv-search').value.trim();
+      const rows = await api('/products' + (q?'?search='+encodeURIComponent(q):''));
+      $('#inv-empty').classList.toggle('hidden', rows.length>0);
+      $('#inv-body').innerHTML = rows.map((p)=>{
+        const low = p.stock <= p.low_threshold;
+        return `<tr><td style="font-weight:700">${esc(p.name)}</td><td class="code">${esc(p.code)||'—'}</td><td class="muted">${esc(p.unit)}</td><td class="num">${money(p.cost)}</td><td class="num">${money(p.price)}</td><td class="amount num ${low?'due':'paid'}">${money(p.stock)}</td><td>${low?'<span class="badge b-due">منخفض</span>':'<span class="badge b-paid">متوفر</span>'}</td><td><button class="btn btn-ghost btn-sm" data-edit="${p.id}">تعديل</button> <button class="btn btn-due btn-sm" data-del="${p.id}">حذف</button></td></tr>`;
+      }).join('');
+      $$('#inv-body [data-edit]').forEach((b)=>b.addEventListener('click', ()=>openProductModal(rows.find(x=>x.id==Number(b.dataset.edit)), load)));
+      $$('#inv-body [data-del]').forEach((b)=>b.addEventListener('click', async ()=>{ if(!confirm('حذف الصنف؟'))return; await api('/products/'+b.dataset.del,{method:'DELETE'}); toast('تم الحذف','ok'); load(); }));
+    }
+    let t; $('#inv-search').addEventListener('input', ()=>{ clearTimeout(t); t=setTimeout(load,250); });
+    $('#add-prod').addEventListener('click', ()=>openProductModal(null, load));
+    load();
+  }
+
+  // ===== محرّر بنود الفاتورة (مشترك للبيع والشراء) =====
+  function lineEditor(products, opts) {
+    // opts: { priceKey:'price'|'cost', label:'السعر'|'التكلفة' }
+    const lines = [];
+    const prodMap = new Map(products.map((p)=>[p.id, p]));
+    const dl = products.map((p)=>`<option value="${p.id}">${esc(p.code?p.code+' | ':'')}${esc(p.name)} (متوفر ${money(p.stock)})</option>`).join('');
+    const wrap = document.createElement('div');
+    wrap.innerHTML = `
+      <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;margin-bottom:10px">
+        <div style="flex:2;min-width:200px"><label>الصنف</label><select id="le-prod"><option value="">— اختر صنفاً —</option>${dl}</select></div>
+        <div style="width:90px"><label>الكمية</label><input type="number" id="le-qty" step="0.01" value="1" style="margin:0"/></div>
+        <div style="width:110px"><label>${opts.label}</label><input type="number" id="le-price" step="0.01" style="margin:0"/></div>
+        <button class="btn btn-green" id="le-add" type="button">＋ أضف</button>
+      </div>
+      <table><thead><tr><th>الصنف</th><th>الكمية</th><th>${opts.label}</th><th>الإجمالي</th><th></th></tr></thead><tbody id="le-body"></tbody></table>
+      <div id="le-empty" class="empty">لم تُضف بنود بعد.</div>`;
+    const body = wrap.querySelector('#le-body');
+    const sel = wrap.querySelector('#le-prod'), qty = wrap.querySelector('#le-qty'), price = wrap.querySelector('#le-price');
+    sel.addEventListener('change', ()=>{ const p=prodMap.get(Number(sel.value)); if(p) price.value = (opts.priceKey==='cost'?p.cost:p.price)||0; });
+    wrap.querySelector('#le-add').addEventListener('click', ()=>{
+      const p = prodMap.get(Number(sel.value)); if(!p) return toast('اختر صنفاً','err');
+      const q = Number(qty.value)||0, pr = Number(price.value)||0; if(q<=0) return toast('أدخل كمية','err');
+      lines.push({ product_id:p.id, name:p.name, code:p.code, stock:p.stock, qty:q, price:pr });
+      sel.value=''; qty.value='1'; price.value=''; renderLines();
+    });
+    function renderLines() {
+      wrap.querySelector('#le-empty').style.display = lines.length?'none':'';
+      body.innerHTML = lines.map((l,i)=>`<tr><td style="font-weight:700">${esc(l.name)}</td><td class="num">${money(l.qty)}</td><td class="num">${money(l.price)}</td><td class="amount num">${money(l.qty*l.price)}</td><td><button class="btn btn-due btn-sm" data-rm="${i}">حذف</button></td></tr>`).join('');
+      body.querySelectorAll('[data-rm]').forEach((b)=>b.addEventListener('click',()=>{ lines.splice(Number(b.dataset.rm),1); renderLines(); if(opts.onChange)opts.onChange(); }));
+      if(opts.onChange) opts.onChange();
+    }
+    return { el: wrap, lines, subtotal: ()=>lines.reduce((s,l)=>s+l.qty*l.price,0) };
+  }
+
+  // ===== بيع جديد (نقطة بيع) =====
+  async function renderSale() {
+    const [products, shops, settings] = await Promise.all([api('/products'), api('/shops'), api('/settings')]);
+    SETTINGS = settings; const rate = Number(settings.vat_rate||0);
+    const v = $('#view');
+    v.innerHTML = `
+      <div class="topbar" style="margin:-24px -26px 22px; position:static;"><div class="page-title">بيع جديد<small>فاتورة بيع — تنقص المخزون تلقائياً</small></div></div>
+      <div class="grid-2">
+        <div class="card"><div class="card-head"><h3>بنود الفاتورة</h3></div><div class="card-body" style="padding:16px" id="sale-lines"></div></div>
+        <div class="card"><div class="card-head"><h3>بيانات الفاتورة</h3></div><div class="card-body" style="padding:16px">
+          <label>الزبون (محل)</label>
+          <select id="sale-shop"><option value="">زبون نقدي (بدون محل)</option>${shops.map((s)=>`<option value="${s.id}">${esc(s.name)}</option>`).join('')}</select>
+          <label>طريقة الدفع</label>
+          <div class="seg" id="sale-pt" style="margin-bottom:14px"><span class="active" data-pt="cash">نقدي</span><span data-pt="card">شبكة</span><span data-pt="transfer">تحويل</span><span data-pt="credit">آجل (دين)</span></div>
+          <label style="margin-bottom:14px"><input type="checkbox" id="sale-vat" style="width:auto;margin:0 0 0 6px"> إضافة ضريبة القيمة المضافة (${money(rate)}%)</label>
+          <div class="card" style="background:var(--green-050);border:none"><div class="card-body" style="padding:12px 14px">
+            <div class="stat-line"><span>المجموع</span><strong class="num" id="sale-sub">0 ${cur()}</strong></div>
+            <div class="stat-line" id="sale-vatline" style="display:none"><span>الضريبة</span><strong class="num" id="sale-vatv">0 ${cur()}</strong></div>
+            <div class="stat-line" style="border:none;font-weight:800;font-size:1.05rem"><span>الإجمالي</span><strong class="num" id="sale-total">0 ${cur()}</strong></div>
+          </div></div>
+          <div class="form-error" id="sale-err"></div>
+          <button class="btn btn-green btn-block" id="sale-save" style="margin-top:10px">💾 حفظ الفاتورة</button>
+        </div></div>
+      </div>`;
+    const ed = lineEditor(products, { priceKey:'price', label:'السعر', onChange: recompute });
+    $('#sale-lines').appendChild(ed.el);
+    let pt = 'cash';
+    $$('#sale-pt span').forEach((s)=>s.addEventListener('click',()=>{ $$('#sale-pt span').forEach(x=>x.classList.remove('active')); s.classList.add('active'); pt=s.dataset.pt; }));
+    $('#sale-vat').addEventListener('change', recompute);
+    function recompute() {
+      const sub = ed.subtotal(); const withVat = $('#sale-vat').checked; const vat = withVat? sub*rate/100 : 0;
+      $('#sale-sub').textContent = money(sub)+' '+cur();
+      $('#sale-vatline').style.display = withVat?'':'none';
+      $('#sale-vatv').textContent = money(vat)+' '+cur();
+      $('#sale-total').textContent = money(sub+vat)+' '+cur();
+    }
+    $('#sale-save').addEventListener('click', async ()=>{
+      $('#sale-err').textContent='';
+      if(!ed.lines.length) return $('#sale-err').textContent='أضف بنداً واحداً على الأقل';
+      const body = { shop_id: $('#sale-shop').value||null, payment_type: pt, apply_vat: $('#sale-vat').checked, items: ed.lines.map((l)=>({product_id:l.product_id, qty:l.qty, price:l.price})) };
+      try { const r = await api('/sales', { method:'POST', body }); toast('تم حفظ الفاتورة #' + r.id, 'ok');
+        if (confirm('تم الحفظ. هل تريد طباعة الفاتورة؟')) printSale(r.id);
+        renderSale();
+      } catch(err){ $('#sale-err').textContent = err.message; }
+    });
+  }
+
+  async function printSale(id) {
+    const s = await api('/sales/'+id);
+    const w = window.open('','_blank');
+    const rows = s.items.map((i)=>`<tr><td>${esc(i.name)}</td><td>${esc(i.code)||''}</td><td>${money(i.qty)}</td><td>${money(i.price)}</td><td>${money(i.amount)}</td></tr>`).join('');
+    const ptL = {cash:'نقدي',card:'شبكة',transfer:'تحويل',credit:'آجل'}[s.payment_type];
+    w.document.write(`<html dir="rtl"><head><meta charset="utf-8"><title>فاتورة بيع #${id}</title>
+      <style>body{font-family:Readex Pro,Arial,sans-serif;padding:24px}h2{color:#463bc0}table{width:100%;border-collapse:collapse;margin-top:12px}th,td{border:1px solid #ddd;padding:8px;text-align:right;font-size:13px}th{background:#f1f0fc}.tot{margin-top:12px;font-size:15px}.tot b{color:#463bc0}</style></head>
+      <body><h2>فاتورة بيع #${id} — ${esc(s.settings.business_name)}</h2>
+      <div>التاريخ: ${esc(s.date)} • الزبون: ${esc(s.shop_name||s.customer_name||'نقدي')} • الدفع: ${ptL}</div>
+      <table><thead><tr><th>الصنف</th><th>الكود</th><th>الكمية</th><th>السعر</th><th>الإجمالي</th></tr></thead><tbody>${rows}</tbody></table>
+      <div class="tot">المجموع: ${money(s.subtotal)} ${esc(s.settings.currency)}<br>الضريبة: ${money(s.vat)} ${esc(s.settings.currency)}<br><b>الإجمالي: ${money(s.total)} ${esc(s.settings.currency)}</b></div>
+      <script>window.onload=()=>window.print()<\/script></body></html>`);
+    w.document.close();
+  }
+
+  // ===== المشتريات =====
+  async function renderPurchases() {
+    const [products, purchases] = await Promise.all([api('/products'), api('/purchases')]);
+    const v = $('#view');
+    v.innerHTML = `
+      <div class="topbar" style="margin:-24px -26px 22px; position:static;"><div class="page-title">المشتريات<small>فاتورة شراء — تزيد المخزون تلقائياً</small></div></div>
+      <div class="grid-2">
+        <div class="card"><div class="card-head"><h3>بنود فاتورة الشراء</h3></div><div class="card-body" style="padding:16px" id="pur-lines"></div></div>
+        <div class="card"><div class="card-head"><h3>بيانات الفاتورة</h3></div><div class="card-body" style="padding:16px">
+          <label>المورّد</label><input id="pur-supplier" placeholder="اسم المورّد (اختياري)" />
+          <label>التاريخ</label><input type="date" id="pur-date" value="${today()}" />
+          <div class="card" style="background:var(--green-050);border:none"><div class="card-body" style="padding:12px 14px"><div class="stat-line" style="border:none;font-weight:800;font-size:1.05rem"><span>إجمالي الشراء</span><strong class="num" id="pur-total">0 ${cur()}</strong></div></div></div>
+          <div class="form-error" id="pur-err"></div>
+          <button class="btn btn-green btn-block" id="pur-save" style="margin-top:10px">💾 حفظ فاتورة الشراء</button>
+        </div></div>
+      </div>
+      <div class="card" style="margin-top:16px"><div class="card-head"><h3>آخر المشتريات</h3></div><div class="card-body" style="padding:0 4px"><table>
+        <thead><tr><th>#</th><th>التاريخ</th><th>المورّد</th><th>الإجمالي</th></tr></thead>
+        <tbody>${purchases.map((p)=>`<tr><td>${p.id}</td><td class="num">${esc(p.date)}</td><td>${esc(p.supplier)||'—'}</td><td class="amount num">${money(p.total)} ${cur()}</td></tr>`).join('')||'<tr><td colspan="4" class="empty">لا مشتريات بعد</td></tr>'}</tbody>
+      </table></div></div>`;
+    const ed = lineEditor(products, { priceKey:'cost', label:'التكلفة', onChange: ()=>{ $('#pur-total').textContent = money(ed.subtotal())+' '+cur(); } });
+    $('#pur-lines').appendChild(ed.el);
+    $('#pur-save').addEventListener('click', async ()=>{
+      $('#pur-err').textContent='';
+      if(!ed.lines.length) return $('#pur-err').textContent='أضف بنداً واحداً على الأقل';
+      const body = { supplier:$('#pur-supplier').value, date:$('#pur-date').value, items: ed.lines.map((l)=>({product_id:l.product_id, qty:l.qty, cost:l.price})) };
+      try { const r = await api('/purchases',{method:'POST',body}); toast('تم حفظ فاتورة الشراء #'+r.id+' وتحديث المخزون','ok'); renderPurchases(); }
+      catch(err){ $('#pur-err').textContent = err.message; }
+    });
+  }
+
   // ===== التقارير =====
   async function renderReports() {
     const month = new Date().toISOString().slice(0, 7);
@@ -447,6 +635,8 @@
       <div class="stat-line"><span>&nbsp;&nbsp;• نقدي</span><strong>${money(r.cash)} ${cur()}</strong></div>
       <div class="stat-line"><span>&nbsp;&nbsp;• شبكة</span><strong>${money(r.card)} ${cur()}</strong></div>
       <div class="stat-line"><span>&nbsp;&nbsp;• تحويل</span><strong>${money(r.transfer)} ${cur()}</strong></div>
+      <div class="stat-line"><span>المبيعات (${money(r.salesCount||0)} فاتورة)</span><strong class="col-paid" style="color:var(--green-3)">${money(r.sales||0)} ${cur()}</strong></div>
+      <div class="stat-line"><span>المشتريات (${money(r.purchasesCount||0)} فاتورة)</span><strong>${money(r.purchases||0)} ${cur()}</strong></div>
       <div class="stat-line"><span>ديون جديدة (بضاعة/سلف)</span><strong class="amount due">${money(r.newDebts)} ${cur()}</strong></div>
       <div class="stat-line"><span>بضاعة مرتجعة</span><strong>${money(r.returns)} ${cur()}</strong></div>
       <div class="stat-line"><span>ضريبة القيمة المضافة (${money(r.vat.rate)}%)</span><strong>${money(r.vat.vat)} ${cur()}</strong></div>
