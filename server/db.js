@@ -54,7 +54,25 @@ db.exec(`
     key TEXT PRIMARY KEY,
     value TEXT
   );
+
+  CREATE TABLE IF NOT EXISTS audit_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    action TEXT NOT NULL,
+    entity TEXT DEFAULT '',
+    details TEXT DEFAULT '',
+    at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_audit_at ON audit_log(at);
 `);
+
+// ترحيلات آمنة لإضافة أعمدة جديدة دون فقدان البيانات
+function ensureColumn(table, column, def) {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all();
+  if (!cols.some((c) => c.name === column)) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${def}`);
+  }
+}
+ensureColumn('shops', 'credit_limit', 'REAL DEFAULT 0');
 
 // إعدادات افتراضية
 const setDefault = db.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)');

@@ -5,8 +5,9 @@ const path = require('path');
 const fs = require('fs');
 const { db, DATA_DIR, dbPath, getSettings } = require('../db');
 const { requireAuth } = require('../auth');
-const { shopTotals, vatBreakdown, round2 } = require('../model');
+const { shopTotals, vatBreakdown, round2, shopAging } = require('../model');
 const { createBackup, listBackups, BACKUP_DIR } = require('../backup');
+const audit = require('../audit');
 
 const router = express.Router();
 const upload = multer({ dest: path.join(DATA_DIR, 'tmp'), limits: { fileSize: 50 * 1024 * 1024 } });
@@ -53,6 +54,28 @@ router.get('/dashboard', (req, res) => {
     )
     .all();
 
+  // تنبيهات: محلات تجاوزت الحد الائتماني أو ديون قديمة (متأخرة في السداد)
+  const shopsFull = db.prepare('SELECT id, name, phone, credit_limit FROM shops').all();
+  const alerts = [];
+  for (const s of shopsFull) {
+    const bal = shopTotals(s.id).balance;
+    if (bal <= 0.001) continue;
+    const aging = shopAging(s.id);
+    const overLimit = s.credit_limit > 0 && bal > s.credit_limit;
+    const overdue = aging.days > 60;
+    if (overLimit || overdue) alerts.push({ id: s.id, name: s.name, phone: s.phone, balance: round2(bal), creditLimit: s.credit_limit, days: aging.days, overLimit, overdue });
+  }
+  alerts.sort((a, b) => b.balance - a.balance);
+
+  // سلسلة آخر 6 أشهر (ديون جديدة مقابل المُسدّد) للرسم البياني
+  const series = [];
+  for (let i = 5; i >= 0; i--) {
+    const dt = new Date(); dt.setMonth(dt.getMonth() - i);
+    const m = dt.toISOString().slice(0, 7);
+    const r = db.prepare(`SELECT COALESCE(SUM(CASE WHEN kind='item' THEN amount ELSE 0 END),0) AS d, COALESCE(SUM(CASE WHEN kind='payment' THEN amount ELSE 0 END),0) AS p FROM entries WHERE substr(date,1,7)=?`).get(m);
+    series.push({ month: m, debts: round2(r.d), paid: round2(r.p) });
+  }
+
   res.json({
     totalDebt: round2(totalDebt),
     shopsCount: shops.length,
@@ -63,9 +86,14 @@ router.get('/dashboard', (req, res) => {
     monthReturns: round2(monthStats.returns),
     topShops: ranked.slice(0, 8),
     recent,
+    alerts: alerts.slice(0, 6),
+    series,
     settings: getSettings(),
   });
 });
+
+// سجل العمليات
+router.get('/audit', (req, res) => res.json(audit.recent(300)));
 
 // ============ المحلات ============
 router.get('/shops', (req, res) => {
@@ -83,23 +111,27 @@ router.get('/shops', (req, res) => {
 });
 
 router.post('/shops', (req, res) => {
-  const { name, code, phone, note } = req.body || {};
+  const { name, code, phone, note, credit_limit } = req.body || {};
   if (!name || !name.trim()) return res.status(400).json({ error: 'اسم المحل مطلوب' });
-  const info = db.prepare('INSERT INTO shops (name, code, phone, note) VALUES (?,?,?,?)').run(name.trim(), (code || '').trim(), (phone || '').trim(), (note || '').trim());
+  const info = db.prepare('INSERT INTO shops (name, code, phone, note, credit_limit) VALUES (?,?,?,?,?)').run(name.trim(), (code || '').trim(), (phone || '').trim(), (note || '').trim(), Number(credit_limit) || 0);
+  audit.log('إضافة محل', 'shop', { id: info.lastInsertRowid, name: name.trim() });
   res.status(201).json({ id: info.lastInsertRowid });
 });
 
 router.put('/shops/:id', (req, res) => {
   const s = db.prepare('SELECT * FROM shops WHERE id=?').get(req.params.id);
   if (!s) return res.status(404).json({ error: 'المحل غير موجود' });
-  const { name, code, phone, note } = req.body || {};
+  const { name, code, phone, note, credit_limit } = req.body || {};
   if (!name || !name.trim()) return res.status(400).json({ error: 'اسم المحل مطلوب' });
-  db.prepare('UPDATE shops SET name=?, code=?, phone=?, note=? WHERE id=?').run(name.trim(), (code || '').trim(), (phone || '').trim(), (note || '').trim(), req.params.id);
+  db.prepare('UPDATE shops SET name=?, code=?, phone=?, note=?, credit_limit=? WHERE id=?').run(name.trim(), (code || '').trim(), (phone || '').trim(), (note || '').trim(), Number(credit_limit) || 0, req.params.id);
+  audit.log('تعديل محل', 'shop', { id: req.params.id, name: name.trim() });
   res.json({ ok: true });
 });
 
 router.delete('/shops/:id', (req, res) => {
+  const s = db.prepare('SELECT name FROM shops WHERE id=?').get(req.params.id);
   db.prepare('DELETE FROM shops WHERE id=?').run(req.params.id);
+  audit.log('حذف محل', 'shop', { id: req.params.id, name: s && s.name });
   res.json({ ok: true });
 });
 
@@ -116,7 +148,9 @@ router.get('/shops/:id', (req, res) => {
   const entries = db.prepare(`SELECT * FROM entries WHERE ${where} ORDER BY date DESC, id DESC`).all(...params);
   const totals = shopTotals(shop.id);
   const vat = vatBreakdown(totals.balance);
-  res.json({ ...shop, totals, vat, entries, settings: getSettings() });
+  const aging = shopAging(shop.id);
+  const overLimit = shop.credit_limit > 0 && totals.balance > shop.credit_limit;
+  res.json({ ...shop, totals, vat, aging, overLimit, entries, settings: getSettings() });
 });
 
 // ============ الحركات ============
@@ -130,6 +164,7 @@ router.post('/shops/:id/items', (req, res) => {
   const d = (date && String(date).trim()) || new Date().toISOString().slice(0, 10);
   db.prepare(`INSERT INTO entries (shop_id, kind, date, item_code, description, qty, price, amount, status, note) VALUES (?,?,?,?,?,?,?,?, 'due', ?)`)
     .run(req.params.id, 'item', d, (item_code || '').trim(), (description || '').trim(), q, p, amount, (note || '').trim());
+  audit.log('إضافة بضاعة (دين)', 'shop:' + req.params.id, { desc: (description || '').trim(), amount });
   res.status(201).json({ ok: true, balance: shopTotals(req.params.id).balance });
 });
 
@@ -143,6 +178,7 @@ router.post('/shops/:id/payments', (req, res) => {
   const d = (date && String(date).trim()) || new Date().toISOString().slice(0, 10);
   db.prepare(`INSERT INTO entries (shop_id, kind, date, amount, payment_method, note) VALUES (?,?,?,?,?,?)`)
     .run(req.params.id, 'payment', d, round2(a), method, (note || '').trim());
+  audit.log('تسجيل دفعة', 'shop:' + req.params.id, { amount: round2(a), method });
   res.status(201).json({ ok: true, balance: shopTotals(req.params.id).balance });
 });
 
@@ -159,17 +195,19 @@ router.post('/shops/:id/returns', (req, res) => {
   const d = (date && String(date).trim()) || new Date().toISOString().slice(0, 10);
   db.prepare(`INSERT INTO entries (shop_id, kind, date, item_code, description, qty, price, amount, note) VALUES (?,?,?,?,?,?,?,?,?)`)
     .run(req.params.id, 'return', d, (item_code || '').trim(), (description || '').trim(), q || 0, p || 0, round2(amt), (note || '').trim());
+  audit.log('بضاعة مرتجعة', 'shop:' + req.params.id, { desc: (description || '').trim(), amount: round2(amt) });
   res.status(201).json({ ok: true, balance: shopTotals(req.params.id).balance });
 });
 
 // تسجيل أصناف محددة كفاتورة خارجية (تُخصم من الإجمالي وتتلوّن)
 router.post('/entries/invoice', (req, res) => {
-  const { ids, invoice_no } = req.body || {};
+  const { ids, invoice_no, with_vat, vat_amount } = req.body || {};
   if (!Array.isArray(ids) || !ids.length) return res.status(400).json({ error: 'لم يتم تحديد أصناف' });
   const inv = (invoice_no || '').trim();
   const stmt = db.prepare("UPDATE entries SET status='invoiced', invoice_no=? WHERE id=? AND kind='item'");
   const tx = db.transaction((list) => { for (const id of list) stmt.run(inv, id); });
   tx(ids.map(Number));
+  audit.log('تسجيل فاتورة خارجية', 'entries', { count: ids.length, invoice_no: inv, vat: with_vat ? round2(vat_amount) : 0 });
   res.json({ ok: true });
 });
 
@@ -189,6 +227,7 @@ router.post('/entries/delete', (req, res) => {
   const stmt = db.prepare('DELETE FROM entries WHERE id=?');
   const tx = db.transaction((list) => { for (const id of list) stmt.run(id); });
   tx(ids.map(Number));
+  audit.log('حذف حركات', 'entries', { ids });
   res.json({ ok: true });
 });
 

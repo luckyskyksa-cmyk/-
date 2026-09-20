@@ -39,4 +39,15 @@ function round2(n) {
   return Math.round((Number(n) + Number.EPSILON) * 100) / 100;
 }
 
-module.exports = { shopTotals, vatBreakdown, round2 };
+// أعمار الديون: عدد الأيام منذ أقدم بضاعة مستحقة غير مسددة
+function shopAging(shopId) {
+  const row = db
+    .prepare("SELECT MIN(date) AS oldest FROM entries WHERE shop_id=? AND kind='item' AND status='due'")
+    .get(shopId);
+  if (!row || !row.oldest) return { oldest: null, days: 0, bucket: 'none' };
+  const days = Math.max(0, Math.floor((Date.now() - new Date(row.oldest + 'T00:00:00').getTime()) / 86400000));
+  const bucket = days > 90 ? 'over90' : days > 60 ? 'd60' : days > 30 ? 'd30' : 'd0';
+  return { oldest: row.oldest, days, bucket };
+}
+
+module.exports = { shopTotals, vatBreakdown, round2, shopAging };

@@ -55,7 +55,7 @@
     const m = (location.hash || '').match(/#\/shop\/(\d+)/);
     if (m) return { route: 'shop', shopId: m[1] };
     const r = (location.hash || '').replace('#/', '');
-    if (['dashboard','shops','reports','import','backups','settings'].includes(r)) return { route: r };
+    if (['dashboard','shops','reports','import','backups','audit','settings'].includes(r)) return { route: r };
     return { route: 'dashboard' };
   }
   window.addEventListener('hashchange', () => { const r = routeFromHash(); navigate(r.route, r.shopId ? { shopId: r.shopId } : {}); });
@@ -63,7 +63,7 @@
 
   function render() {
     const v = $('#view'); v.innerHTML = '<div class="loading">جارٍ التحميل…</div>';
-    ({ dashboard: renderDashboard, shops: renderShops, shop: renderShop, reports: renderReports, import: renderImport, backups: renderBackups, settings: renderSettings }[state.route] || renderDashboard)();
+    ({ dashboard: renderDashboard, shops: renderShops, shop: renderShop, reports: renderReports, import: renderImport, backups: renderBackups, audit: renderAudit, settings: renderSettings }[state.route] || renderDashboard)();
   }
 
   // ===== لوحة التحكم =====
@@ -95,6 +95,16 @@
           <div class="card-head"><h3>🔁 أحدث الحركات</h3></div>
           <div class="card-body"><table><tbody id="recent"></tbody></table></div>
         </div>
+      </div>
+      <div class="grid-2">
+        <div class="card">
+          <div class="card-head"><h3>📈 الديون والمُسدّد — آخر 6 أشهر</h3></div>
+          <div class="card-body" style="padding:16px">${miniChart(d.series||[])}</div>
+        </div>
+        <div class="card">
+          <div class="card-head"><h3>🔔 تنبيهات المتأخرين</h3></div>
+          <div class="card-body" id="alerts"></div>
+        </div>
       </div>`;
 
     const maxBal = Math.max(1, ...d.topShops.map((s) => s.balance));
@@ -117,6 +127,22 @@
       return `<tr class="clickable" data-shop="${e.shop_id}"><td>${kindBadge[e.kind]||''}</td><td>${esc(e.shop_name)}<div class="sub">${esc(e.description||e.payment_method||'')}</div></td><td class="amount ${cls} num">${sign}${money(e.amount)}</td></tr>`;
     }).join('') : '<tr><td class="empty">لا حركات</td></tr>';
     $$('#recent tr[data-shop]').forEach((r) => r.addEventListener('click', () => navigate('shop', { shopId: r.dataset.shop })));
+
+    // تنبيهات المتأخرين مع زر تذكير واتساب
+    const al = $('#alerts');
+    al.innerHTML = (d.alerts && d.alerts.length) ? d.alerts.map((a) => `
+      <div class="shop-rank" style="cursor:default">
+        <div class="shop-av" style="background:var(--due-050);color:var(--due);border-color:var(--due-050)">!</div>
+        <div class="shop-meta"><div class="nm">${esc(a.name)}</div>
+          <div class="sub">${a.overLimit?'تجاوز الحد الائتماني • ':''}${a.overdue?('متأخر '+a.days+' يوم'):''}</div></div>
+        <div style="display:flex;gap:6px;align-items:center">
+          <div class="shop-amt"><div class="big">${money(a.balance)}</div><div class="lbl">${cur()}</div></div>
+          <button class="btn btn-green btn-sm wa-btn" data-phone="${esc(a.phone)}" data-name="${esc(a.name)}" data-bal="${a.balance}">📲 تذكير</button>
+        </div>
+      </div>`).join('') : '<div class="empty">لا يوجد متأخرون 👍</div>';
+    $$('#alerts .wa-btn').forEach((b) => b.addEventListener('click', () => {
+      waSend(b.dataset.phone, `السلام عليكم، تذكير ودّي من ${SETTINGS.business_name}: الرصيد المستحق على حسابكم ${money(b.dataset.bal)} ${cur()}. نأمل ترتيب السداد، وشكراً لتعاملكم.`);
+    }));
 
     $('#qs').addEventListener('click', () => openShopModal());
     $('#all-shops').addEventListener('click', () => navigate('shops'));
@@ -165,8 +191,9 @@
     v.innerHTML = `
       <div class="topbar" style="margin:-24px -26px 22px; position:static;">
         <div class="page-title">${esc(d.name)}<small><span class="back-link" id="back">‹ رجوع للمحلات</span> • ${esc(d.code)?('كود: '+esc(d.code)):''} ${esc(d.phone)?('• '+esc(d.phone)):''}</small></div>
-        <div class="topbar-actions"><button class="btn btn-ghost" id="print-statement">🖨️ كشف حساب PDF</button><button class="btn btn-ghost" id="edit-shop">تعديل</button></div>
+        <div class="topbar-actions"><button class="btn btn-green" id="wa-remind">📲 تذكير واتساب</button><button class="btn btn-ghost" id="print-statement">🖨️ كشف حساب PDF</button><button class="btn btn-ghost" id="edit-shop">تعديل</button></div>
       </div>
+      ${(d.overLimit || (d.aging && d.aging.days > 60)) ? `<div class="card" style="margin-bottom:14px;border-color:var(--due);background:var(--due-050)"><div class="card-body" style="padding:12px 16px;color:var(--due);font-weight:700">${d.overLimit?`⚠️ تجاوز الحد الائتماني (${money(d.credit_limit)} ${cur()}). `:''}${(d.aging&&d.aging.days>60)?`⏳ أقدم دين غير مسدّد منذ ${d.aging.days} يوم (${esc(d.aging.oldest)}).`:''}</div></div>`:''}
       <div class="kpis">
         <div class="kpi accent"><div class="ic">💰</div><div class="label">الرصيد المستحق الآن</div><div class="value">${money(t.balance)}<span class="cur">${cur()}</span></div></div>
         <div class="kpi"><div class="ic">✅</div><div class="label">إجمالي المسدد</div><div class="value amount paid">${money(t.payments)}<span class="cur">${cur()}</span></div></div>
@@ -206,6 +233,7 @@
     $('#back').addEventListener('click', () => navigate('shops'));
     $('#edit-shop').addEventListener('click', () => openShopModal(d, () => renderShop()));
     $('#print-statement').addEventListener('click', () => printStatement(d));
+    $('#wa-remind').addEventListener('click', () => waSend(d.phone, `السلام عليكم، تذكير ودّي من ${SETTINGS.business_name}: الرصيد المستحق على حسابكم ${money(t.balance)} ${cur()}. نأمل ترتيب السداد، وشكراً.`));
     $('#a-item').addEventListener('click', () => openItemModal(d.id));
     $('#a-pay').addEventListener('click', () => openPaymentModal(d.id));
     $('#a-ret').addEventListener('click', () => openReturnModal(d.id));
@@ -257,9 +285,31 @@
 
   async function invoiceSelected() {
     const ids = [...state.selected]; if (!ids.length) return toast('حدّد أصنافاً أولاً', 'err');
-    const invoice_no = prompt('رقم الفاتورة الخارجية (اختياري):', '') || '';
-    try { await api('/entries/invoice', { method: 'POST', body: { ids, invoice_no } }); state.selected = new Set(); toast('تم تسجيل المحدد كفاتورة وخصمه من الإجمالي', 'ok'); renderShop(); }
-    catch (e) { toast(e.message, 'err'); }
+    // احسب مجموع الأصناف المحددة + الضريبة وقت عمل الفاتورة
+    const rows = $$('#entries-body tr[data-id]').filter((r) => state.selected.has(Number(r.dataset.id)));
+    let subtotal = 0; rows.forEach((r) => { const c = r.children[6]; const val = Number((c?.textContent||'').replace(/[^\d.\-]/g,'')); if (Number.isFinite(val)) subtotal += val; });
+    const rate = Number(SETTINGS.vat_rate || 0);
+    const vat = Math.round(subtotal * rate) / 100 * 1; const vatAmt = +(subtotal * rate / 100).toFixed(2); const total = +(subtotal + vatAmt).toFixed(2);
+    const m = modal(`
+      <div class="modal-head"><h3>تسجيل فاتورة خارجية</h3><button class="modal-close" data-close>&times;</button></div>
+      <p class="sub">سيتم إخراج ${ids.length} صنف كفاتورة وخصمها من دين المحل.</p>
+      <label>رقم الفاتورة (اختياري)</label><input id="inv-no" placeholder="مثال: 1042" />
+      <label style="margin-top:6px"><input type="checkbox" id="inv-vat" checked style="width:auto;margin:0 0 0 6px"> إضافة ضريبة القيمة المضافة (${money(rate)}%)</label>
+      <div class="card" style="margin-top:10px"><div class="card-body" style="padding:12px 14px">
+        <div class="stat-line"><span>المجموع قبل الضريبة</span><strong class="num">${money(subtotal)} ${cur()}</strong></div>
+        <div class="stat-line" id="vat-line"><span>الضريبة (${money(rate)}%)</span><strong class="num">${money(vatAmt)} ${cur()}</strong></div>
+        <div class="stat-line" style="border:none;font-weight:800"><span>الإجمالي بالفاتورة</span><strong class="num" id="inv-total">${money(total)} ${cur()}</strong></div>
+      </div></div>
+      <div class="modal-actions"><button type="button" class="btn btn-ghost" data-close>إلغاء</button><button class="btn btn-green btn-block" id="inv-confirm">تأكيد وإخراج الفاتورة</button></div>`);
+    $('#inv-vat').addEventListener('change', (e) => {
+      const withVat = e.target.checked; const tot = withVat ? total : subtotal;
+      $('#vat-line').style.opacity = withVat ? '1' : '.4';
+      $('#inv-total').textContent = money(tot) + ' ' + cur();
+    });
+    $('#inv-confirm').addEventListener('click', async () => {
+      try { await api('/entries/invoice', { method: 'POST', body: { ids, invoice_no: $('#inv-no').value, with_vat: $('#inv-vat').checked, vat_amount: vatAmt } }); m.close(); state.selected = new Set(); toast('تم إخراج الفاتورة وخصمها من الإجمالي', 'ok'); renderShop(); }
+      catch (e) { toast(e.message, 'err'); }
+    });
   }
   async function deleteSelected() {
     const ids = [...state.selected]; if (!ids.length) return toast('حدّد أصنافاً أولاً', 'err');
@@ -283,14 +333,15 @@
       <div class="modal-head"><h3>${shop?'تعديل محل':'محل جديد'}</h3><button class="modal-close" data-close>&times;</button></div>
       <form id="shop-form">
         <label>اسم المحل *</label><input id="s-name" value="${esc(shop?.name)||''}" />
-        <div class="row2"><div><label>الكود</label><input id="s-code" value="${esc(shop?.code)||''}" /></div><div><label>الهاتف</label><input id="s-phone" value="${esc(shop?.phone)||''}" /></div></div>
+        <div class="row2"><div><label>الكود</label><input id="s-code" value="${esc(shop?.code)||''}" /></div><div><label>الهاتف (لواتساب)</label><input id="s-phone" value="${esc(shop?.phone)||''}" /></div></div>
+        <label>الحد الائتماني (تنبيه عند تجاوزه) — 0 = بدون حد</label><input type="number" id="s-limit" step="0.01" value="${shop?.credit_limit||0}" />
         <label>ملاحظات</label><textarea id="s-note" rows="2">${esc(shop?.note)||''}</textarea>
         <div class="form-error" id="s-err"></div>
         <div class="modal-actions"><button type="button" class="btn btn-ghost" data-close>إلغاء</button><button class="btn btn-green btn-block" type="submit">حفظ</button></div>
       </form>`);
     $('#shop-form').addEventListener('submit', async (e) => {
       e.preventDefault();
-      const body = { name: $('#s-name').value, code: $('#s-code').value, phone: $('#s-phone').value, note: $('#s-note').value };
+      const body = { name: $('#s-name').value, code: $('#s-code').value, phone: $('#s-phone').value, note: $('#s-note').value, credit_limit: $('#s-limit').value };
       try {
         if (shop) await api('/shops/' + shop.id, { method: 'PUT', body });
         else await api('/shops', { method: 'POST', body });
@@ -364,16 +415,28 @@
     v.innerHTML = `
       <div class="topbar" style="margin:-24px -26px 22px; position:static;">
         <div class="page-title">التقارير<small>تقرير شهري قابل للحفظ PDF وإرساله بواتساب</small></div>
-        <div class="topbar-actions no-print"><input type="month" id="rep-month" value="${month}" style="margin:0;width:auto" /><button class="btn btn-green" id="rep-print">🖨️ حفظ PDF / طباعة</button></div>
+        <div class="topbar-actions no-print"><input type="month" id="rep-month" value="${month}" style="margin:0;width:auto" /><button class="btn btn-ghost" id="rep-wa">📲 إرسال واتساب</button><button class="btn btn-green" id="rep-print">🖨️ حفظ PDF / طباعة</button></div>
       </div>
       <div id="rep-body"></div>`;
+    let last = null;
     const load = async () => {
       const r = await api('/reports/monthly?month=' + $('#rep-month').value);
-      SETTINGS = r.settings || SETTINGS;
+      SETTINGS = r.settings || SETTINGS; last = r;
       $('#rep-body').innerHTML = reportDoc(r);
     };
     $('#rep-month').addEventListener('change', load);
     $('#rep-print').addEventListener('click', () => window.print());
+    $('#rep-wa').addEventListener('click', () => {
+      if (!last) return;
+      const txt = `تقرير ${SETTINGS.business_name} — شهر ${last.month}\n`+
+        `• المُسدّد: ${money(last.paid)} ${cur()} (نقدي ${money(last.cash)} / شبكة ${money(last.card)} / تحويل ${money(last.transfer)})\n`+
+        `• ديون جديدة: ${money(last.newDebts)} ${cur()}\n`+
+        `• مرتجعات: ${money(last.returns)} ${cur()}\n`+
+        `• ضريبة (${money(last.vat.rate)}%): ${money(last.vat.vat)} ${cur()}\n`+
+        `• صافي الديون المستحقة: ${money(last.totalDebt)} ${cur()}\n`+
+        `أعلى المحلات: ${last.topShops.map((s)=>esc(s.name)+' '+money(s.balance)).join(' | ')}`;
+      waSend('', txt);
+    });
     load();
   }
 
@@ -480,6 +543,18 @@
     $('#export-json').addEventListener('click', () => window.location.href = '/api/export');
   }
 
+  // ===== سجل العمليات =====
+  async function renderAudit() {
+    const rows = await api('/audit');
+    const v = $('#view');
+    v.innerHTML = `
+      <div class="topbar" style="margin:-24px -26px 22px; position:static;"><div class="page-title">سجل العمليات<small>كل إضافة/تعديل/حذف مسجّلة (للمراجعة والمساءلة)</small></div></div>
+      <div class="card"><div class="card-body" style="padding:0 4px"><table>
+        <thead><tr><th>الوقت</th><th>العملية</th><th>الجهة</th><th>التفاصيل</th></tr></thead>
+        <tbody>${rows.map((r)=>`<tr><td class="num">${esc(r.at)}</td><td><span class="badge b-inv">${esc(r.action)}</span></td><td class="code">${esc(r.entity)}</td><td class="sub">${esc(r.details)}</td></tr>`).join('')}</tbody>
+      </table>${rows.length?'':'<div class="empty">لا عمليات بعد.</div>'}</div></div>`;
+  }
+
   // ===== الإعدادات =====
   async function renderSettings() {
     const s = await api('/settings'); SETTINGS = s;
@@ -503,6 +578,31 @@
   }
 
   function today() { return new Date().toISOString().slice(0, 10); }
+
+  // فتح واتساب برسالة جاهزة (يعمل من الجوال والويب)
+  function waSend(phone, text) {
+    let p = String(phone || '').replace(/[^\d]/g, '');
+    if (p && p.startsWith('0')) p = '966' + p.slice(1); // تحويل الأرقام السعودية المحلية
+    const url = 'https://wa.me/' + (p || '') + '?text=' + encodeURIComponent(text);
+    window.open(url, '_blank');
+  }
+
+  // رسم بياني بسيط (SVG) لآخر 6 أشهر: ديون مقابل مُسدّد
+  function miniChart(series) {
+    const w = 460, h = 150, pad = 24, n = series.length || 1;
+    const max = Math.max(1, ...series.map((s) => Math.max(s.debts, s.paid)));
+    const bw = (w - pad * 2) / n / 2.6;
+    let bars = '';
+    series.forEach((s, i) => {
+      const x = pad + (i + 0.5) * ((w - pad * 2) / n);
+      const hd = (s.debts / max) * (h - pad * 2), hp = (s.paid / max) * (h - pad * 2);
+      bars += `<rect x="${x - bw - 2}" y="${h - pad - hd}" width="${bw}" height="${hd}" rx="3" fill="var(--due)"></rect>`;
+      bars += `<rect x="${x + 2}" y="${h - pad - hp}" width="${bw}" height="${hp}" rx="3" fill="var(--green)"></rect>`;
+      bars += `<text x="${x}" y="${h - 7}" text-anchor="middle" font-size="10" fill="var(--muted)">${esc(s.month.slice(5))}</text>`;
+    });
+    return `<svg viewBox="0 0 ${w} ${h}" style="width:100%;height:${h}px">${bars}</svg>
+      <div style="display:flex;gap:16px;justify-content:center;font-size:.8rem;color:var(--muted)"><span>🟥 ديون جديدة</span><span>🟩 مُسدّد</span></div>`;
+  }
 
   // ===== بدء التشغيل =====
   (async function init() {
